@@ -86,3 +86,20 @@ def test_the_recorder_comes_back_when_a_call_fails(served, monkeypatch):
     with pytest.raises(RuntimeError):
         warmup.warm_up(worker(Model((32, 48))))
     assert served.dispatcher.recorder == "recorder"
+
+
+def test_the_served_points_leave_out_a_ranges_key():
+    """With gemm's m bucketed, a RANGE_SAFE kernel's table keys its range beside its measured m: only the measured m
+    become Points (a range's key is no one m, and PointSpec takes no such m)."""
+    from aklr.core.contract.fastkey import FastKeyCodec
+    from tests.op_case import OpCase
+
+    case = OpCase.of("gemm@1.0")
+    codec = FastKeyCodec.from_contract(case.contract)
+    measured = codec.exact_key(codec.to_fast_key(case.point))
+    ranged = codec.match_key(codec.to_fast_key(case.point))
+    assert measured != ranged
+    dispatcher = SimpleNamespace(
+        contract=case.contract, table=SimpleNamespace(runnables={measured: 0, ranged: 0})
+    )
+    assert [p.axes["m"] for p in warmup._served_gemm_points(dispatcher)] == [case.point.axes["m"]]
