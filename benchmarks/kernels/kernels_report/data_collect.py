@@ -152,13 +152,15 @@ def summarize(
         min_speedup=min_speedup,
     )
     codec = FastKeyCodec.from_contract(contract)
+    # a bucketed axis keys each measured workload by its own value too (a range key only for RANGE_SAFE kernels)
+    key_of = codec.exact_key if codec.bucketed_indices else codec.match_key
     candidates: dict[tuple, int] = {}
     labels: dict[tuple, dict[str, str]] = {}
     for _, schema in schemas:
         points = {}
         for w in schema.workloads:
             point = schema.point(w.axes)
-            points.setdefault(codec.match_key(codec.to_fast_key(point)), point)
+            points.setdefault(key_of(codec.to_fast_key(point)), point)
         for key, point in points.items():
             candidates[key] = candidates.get(key, 0) + 1
             labels.setdefault(key, point_dims(contract, point))
@@ -167,9 +169,7 @@ def summarize(
     for key in candidates:
         if key in table.runnables:
             path, schema = table.runnables[key]
-            same = [
-                w for w in schema.workloads if codec.match_key(codec.to_fast_key(schema.point(w.axes))) == key
-            ]
+            same = [w for w in schema.workloads if key_of(codec.to_fast_key(schema.point(w.axes))) == key]
             # the rank dispatch serves the key at: the lowest among its any_size workloads
             workload = min(same, key=schema.rank_key)
             # without a baseline, validation's speedup is untimed or over an incumbent: it ranks only
