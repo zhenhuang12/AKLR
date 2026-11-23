@@ -434,7 +434,13 @@ once per file; changing it is rejected, not a way to change the inputs.
 `workloads` is a list (model `WorkloadSpec`): `{"axes": {<var axis>: int}, "scalars": {...}, "accuracy": "passed" | "failed", "speedup": float, "microseconds": float}`,
 axes in contract order, sorted by their values, each Point once. A var axis the contract declares `any_size`
 (the rows of a KV cache, which the kernel does not depend on) is served at every value of its domain: its workload
-values are only the sizes bench runs. `scalars` holds every present scalar input, a
+values are only the sizes bench runs. A var axis the contract declares `bucketed` (a token count, which a prefill's
+chunk tail or an eager batch makes any value) is served at its measured values first, then by power-of-two range
+[2**(b-1), 2**b): a value no workload holds is served only by a kernel whose module sets `RANGE_SAFE = True` (it
+compiles and caches nothing per value of that axis, so an unmeasured value costs no more than a measured one), only
+where every workload of the schema in that range qualifies, and only between the lowest and highest value the schema
+measured there. A schema that is to serve a range therefore measures both its ends: 2**(b-1) and 2**b - 1, or the
+largest count the deployment reaches. `scalars` holds every present scalar input, a
 captured or authored value inside its declared range; it is omitted when the schema has none. `speedup` (over the contract's baseline) and
 `accuracy` are written by CI on every workload or none (a `failed` one may lack `speedup`; it is never dispatched),
 with one complete `kernel.targets` item. `microseconds` records the time behind that `speedup`: the kernel's median
