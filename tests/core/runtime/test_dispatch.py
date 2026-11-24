@@ -231,6 +231,77 @@ class TestKernelDispatcher:
         call = case.call(case.inputs())
         assert dispatcher.dispatch(call) is FallbackReason.NOT_QUALIFIED
 
+    @pytest.mark.parametrize(
+        ("m", "served"),
+        [(5, True), (0, False), (2**20 + 1, False)],
+        ids=["inside_its_range", "below_its_lo", "above_its_hi"],
+    )
+    def test_bucketed_axis_keeps_its_bounds(
+        self,
+        builder_registry: BuilderRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        m: int,
+        served: bool,
+    ) -> None:
+        """A bucketed axis's value no workload holds is served by its range only inside the axis's bounds:
+        gemm measured at m 4 and 7 (the range [4, 8)) by a RANGE_SAFE kernel serves m 5; m 0 (below m's
+        lowest) and 2**20 + 1 (above its highest) are out of contract."""
+        monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)  # no device needed
+        case = OpCase.of("gemm@1.0")
+        schema = case.schema("RANGE_SAFE = True\n\n\n" + GEMM_KERNEL_SOURCE)
+        workloads = tuple(
+            case.contract.workload_for(
+                case.point.model_copy(update={"axes": {**case.point.axes, "m": n}}), {}
+            )
+            for n in (4, 7)
+        )
+        dispatcher = self._dispatcher(builder_registry, (schema.model_copy(update={"workloads": workloads}),))
+        call = case.call(case.inputs())
+        call["a"] = torch.empty(m, call["a"].shape[1], dtype=call["a"].dtype)
+        if served:
+            call["a"].normal_()
+            torch.testing.assert_close(dispatcher.dispatch(call), call["a"] @ call["b"].mT, rtol=0, atol=0)
+        else:
+            assert dispatcher.dispatch(call) is FallbackReason.OUT_OF_CONTRACT
+
+    @pytest.mark.parametrize(
+        ("n_plan_rows", "served"), [(6, True), (7, False)], ids=["constraint_holds", "constraint_fails"]
+    )
+    def test_bucketed_axis_keeps_the_constraints_reading_it(
+        self,
+        builder_registry: BuilderRegistry,
+        monkeypatch: pytest.MonkeyPatch,
+        n_plan_rows: int,
+        served: bool,
+    ) -> None:
+        """topk_transform_paged measured at 4 and 7 tokens (the range [4, 8)) by a RANGE_SAFE kernel serves 5
+        tokens with 6 plan rows; with 7 (n_plan_rows == n_tokens + 1 fails) the call is out of contract."""
+        monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)  # no device needed
+        case = OpCase.of("topk_transform_paged@1.0")
+        schema = case.schema(
+            "RANGE_SAFE = True\n\n\ndef run(*, out_page_indices, **_):\n    out_page_indices.fill_(-1)\n"
+        )
+        workloads = tuple(
+            case.contract.workload_for(
+                case.point.model_copy(
+                    update={"axes": {**case.point.axes, "n_tokens": n, "n_plan_rows": n + 1}}
+                ),
+                {},
+            )
+            for n in (4, 7)
+        )
+        dispatcher = self._dispatcher(builder_registry, (schema.model_copy(update={"workloads": workloads}),))
+        call = case.call(case.inputs())
+        call["scores"] = torch.zeros(5, call["scores"].shape[1])
+        call["seq_lens"] = torch.zeros(5, dtype=torch.int32)
+        call["metadata"] = torch.zeros(n_plan_rows, 2, dtype=torch.int32)
+        call["out_page_indices"] = torch.zeros(5, call["out_page_indices"].shape[1], dtype=torch.int32)
+        result = dispatcher.dispatch(call)
+        if served:
+            assert result is call["out_page_indices"] and (result == -1).all()
+        else:
+            assert result is FallbackReason.OUT_OF_CONTRACT and not call["out_page_indices"].any()
+
     def test_mutable_input_sharing_bytes_declines(self, builder_registry: BuilderRegistry) -> None:
         """A mutable input sharing a byte with another input falls back, unwritten."""
         case, dispatcher = self._state_dispatcher(builder_registry)
