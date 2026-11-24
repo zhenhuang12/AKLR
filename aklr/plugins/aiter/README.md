@@ -435,7 +435,8 @@ once per file; changing it is rejected, not a way to change the inputs.
 axes in contract order, sorted by their values, each Point once. A var axis the contract declares `any_size`
 (the rows of a KV cache, which the kernel does not depend on) is served at every value of its domain: its workload
 values are only the sizes bench runs. A var axis the contract declares `bucketed` (a token count, which a prefill's
-chunk tail or an eager batch makes any value) is served at its measured values first, then by power-of-two range
+chunk tail or an eager batch makes any value) is served at its measured values first (a value some workload holds
+is decided by those workloads alone, its fallback reason theirs), then by power-of-two range
 [2**(b-1), 2**b): a value no workload holds is served only by a kernel whose module sets `RANGE_SAFE = True` (it
 compiles and caches nothing per value of that axis, so an unmeasured value costs no more than a measured one), only
 where every workload of the schema in that range qualifies, and only between the lowest and highest value the schema

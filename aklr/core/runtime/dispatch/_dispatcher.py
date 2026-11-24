@@ -99,8 +99,8 @@ class DispatchTable:
     # keys with candidates but no qualified one; a plain dict, as runnables
     fallback_reasons: dict[FastKey, FallbackReason]
     match_key: Callable[[FastKey], FastKey]
-    # a contract with a bucketed axis: a call's exact key (``FastKeyCodec.exact_key``), served first where a
-    # workload measured there qualifies; None without one
+    # a contract with a bucketed axis: a call's exact key (``FastKeyCodec.exact_key``), which alone decides a call
+    # some workload was measured at (served where one qualifies, else its reason); None without one
     exact_key: Callable[[FastKey], FastKey] | None = None
     # a served range key -> per bucketed axis, the lowest and highest value its schema measured in that range: an
     # unmeasured value is served only between them (a kernel's tile classes end at its last measured value, past which
@@ -193,7 +193,8 @@ class DispatchTable:
         if self.exact_key is not None:
             match = exact = self.exact_key(key)
             runnable = self.runnables.get(match)
-        if runnable is None:
+        # a value a workload measured is decided by it alone: its range serves only values no workload holds
+        if runnable is None and exact not in self.fallback_reasons:
             match = self.match_key(key)
             runnable = self.runnables.get(match)
             span = self.spans.get(match) if runnable is not None else None
@@ -202,14 +203,10 @@ class DispatchTable:
             ):
                 runnable = None  # outside what its schema measured in the range
         if runnable is None:
-            reason = (
-                self.fallback_reasons.get(match)
-                or self.fallback_reasons.get(exact)
-                or (
-                    FallbackReason.NO_WORKLOAD
-                    if self.runnables or self.fallback_reasons
-                    else FallbackReason.NO_SCHEMA
-                )
+            reason = self.fallback_reasons.get(match) or (
+                FallbackReason.NO_WORKLOAD
+                if self.runnables or self.fallback_reasons
+                else FallbackReason.NO_SCHEMA
             )
             return key, match, reason
         if match not in self.warmed_keys and torch.cuda.is_current_stream_capturing():

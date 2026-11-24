@@ -126,3 +126,23 @@ def test_a_range_is_served_only_between_its_lowest_and_highest_measured_values(m
     assert table.lookup(_point(case, 2100))[2] is runnable
     assert table.lookup(_point(case, 3500))[2] is FallbackReason.NO_WORKLOAD
     assert table.lookup(_point(case, 2050))[2] is FallbackReason.NO_WORKLOAD
+
+
+@pytest.mark.parametrize(
+    ("speedup", "reason"),
+    [(None, FallbackReason.INACCURATE), (0.5, FallbackReason.NOT_QUALIFIED)],
+    ids=["inaccurate", "slow"],
+)
+def test_a_value_a_workload_measured_is_decided_by_it_not_by_a_range(monkeypatch, speedup, reason) -> None:
+    """One schema serves [2048, 4096) between 2100 and 3072 (2.0x); another measured 2500 and failed there: 2500
+    falls back with that workload's reason, not served by the range, while 3000, which no workload holds, is."""
+    case = OpCase.of("fused_moe@1.0")
+    wide, other = _Runnable(monkeypatch, True), _Runnable(monkeypatch, True)
+    table = _table(
+        monkeypatch,
+        case,
+        (_schema(case, {2100: 2.0, 3072: 2.0}), wide),
+        (_schema(case, {2500: speedup}), other),
+    )
+    assert table.lookup(_point(case, 2500))[2] is reason
+    assert table.lookup(_point(case, 3000))[2] is wide
