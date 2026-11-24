@@ -135,7 +135,9 @@ TOPK_TRANSFORM_PAGED = OpContract(
             multiple_of=4,
             is_var=True,
         ),
-        "n_plan_rows": axis("Plan rows: n_tokens + 1.", 2, 65537, is_var=True),
+        # n_tokens + 1 by the constraint, checked on every call: no key of its own, so that a range of
+        # n_tokens is one key
+        "n_plan_rows": axis("Plan rows: n_tokens + 1.", 2, 65537, is_var=True, any_size=True),
         "topk": axis("Candidates selected per row.", 1, 2048),
         "n_pages": axis("Page table columns.", 0, 2**31, is_var=True),
     },

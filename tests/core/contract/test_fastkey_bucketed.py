@@ -188,3 +188,21 @@ def test_a_range_kernel_is_warm_only_once_it_ran(monkeypatch) -> None:
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     assert table.lookup(_point(case, 2500))[2] is narrow
     assert table.lookup(_point(case, 3000))[2] is FallbackReason.NOT_WARMED
+
+
+@pytest.mark.parametrize(
+    ("contract_id", "plus_one_axis"),
+    [("sparse_prefill_mxfp8@1.0", "n_offsets"), ("topk_transform_paged@1.0", "n_plan_rows")],
+    ids=["sparse_prefill_mxfp8_n_offsets", "topk_transform_paged_n_plan_rows"],
+)
+def test_an_axis_bound_to_n_tokens_plus_one_does_not_split_its_range(contract_id, plus_one_axis) -> None:
+    """An axis the contract holds to n_tokens + 1 (CSR offsets, plan rows) leaves 3000 and 3072 tokens one range key,
+    so a RANGE_SAFE kernel measured at 3072 may serve 3000."""
+    case = OpCase.of(contract_id)
+    codec = FastKeyCodec.from_contract(case.contract)
+
+    def key(n_tokens):
+        axes = {**case.point.axes, "n_tokens": n_tokens, plus_one_axis: n_tokens + 1}
+        return codec.match_key(codec.to_fast_key(case.point.model_copy(update={"axes": axes})))
+
+    assert key(3000) == key(3072)

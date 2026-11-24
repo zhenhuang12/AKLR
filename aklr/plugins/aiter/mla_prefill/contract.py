@@ -93,7 +93,9 @@ SPARSE_PREFILL_MXFP8 = OpContract(
         "extend_rows": axis("Rows of the extend pool.", 1, 131072, is_var=True),
         "prefix_nnz": axis("Prefix CSR entries.", 0, 268435456, is_var=True),
         "extend_nnz": axis("Extend CSR entries.", 0, 268435456, is_var=True),
-        "n_offsets": axis("CSR offsets, queries plus one.", 2, 16385, is_var=True),
+        # n_tokens + 1 by the constraint, checked on every call: no key of its own, so that a range of
+        # n_tokens is one key
+        "n_offsets": axis("CSR offsets, queries plus one.", 2, 16385, is_var=True, any_size=True),
     },
     constraints=("n_offsets == n_tokens + 1",),
     inputs={
