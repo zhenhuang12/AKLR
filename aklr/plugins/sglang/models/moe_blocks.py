@@ -8,6 +8,7 @@ from __future__ import annotations
 __all__ = [
     "experts_fall_back",
     "experts_format",
+    "fused_shared_experts",
     "runtime_falls_back",
     "topk_falls_back",
 ]
@@ -55,10 +56,17 @@ def topk_falls_back(topk, *, scoring_func: str, biased: bool) -> bool:
         or config.scoring_func != scoring_func
         or (config.correction_bias is not None) != biased
         or not config.renormalize
-        or config.num_fused_shared_experts != 0
+        or fused_shared_experts(config) != 0
         or config.routed_scaling_factor not in (None, 1.0)
         or config.apply_routed_scaling_factor_on_output
     )
+
+
+def fused_shared_experts(config) -> int:
+    """The shared experts a TopKConfig appends to its routed ones: sglang 0.5.23 keeps the count
+    in its shared_experts layout, 0.5.22 on the config itself."""
+    shared = getattr(config, "shared_experts", None)
+    return config.num_fused_shared_experts if shared is None else shared.num_fused_shared_experts
 
 
 def experts_format(experts) -> str:
