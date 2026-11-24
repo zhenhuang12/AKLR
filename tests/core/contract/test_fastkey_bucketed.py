@@ -146,3 +146,45 @@ def test_a_value_a_workload_measured_is_decided_by_it_not_by_a_range(monkeypatch
     )
     assert table.lookup(_point(case, 2500))[2] is reason
     assert table.lookup(_point(case, 3000))[2] is wide
+
+
+def _narrow_and_wide(monkeypatch, case):
+    """The table of a 3.0x kernel measured at 2300 and 2600 and a 2.0x one at 2100 and 3072, both RANGE_SAFE in
+    [2048, 4096): (the table, the narrow kernel, the wide one)."""
+    narrow, wide = _Runnable(monkeypatch, True), _Runnable(monkeypatch, True)
+    table = _table(
+        monkeypatch,
+        case,
+        (_schema(case, {2300: 3.0, 2600: 3.0}), narrow),
+        (_schema(case, {2100: 2.0, 3072: 2.0}), wide),
+    )
+    return table, narrow, wide
+
+
+@pytest.mark.parametrize(
+    ("n_tokens", "serving"),
+    [(2400, "narrow"), (3000, "wide"), (2050, None)],
+    ids=["both_measured_around_it", "only_the_wide_one_around_it", "none_around_it"],
+)
+def test_a_range_is_served_by_the_best_kernel_measured_around_the_value(
+    monkeypatch, n_tokens, serving
+) -> None:
+    """A faster kernel measured over a narrower part of a range hides no slower one measured around a value: 2400
+    takes the 3.0x kernel (2300-2600), 3000 the 2.0x one (2100-3072), 2050 neither."""
+    case = OpCase.of("fused_moe@1.0")
+    table, narrow, wide = _narrow_and_wide(monkeypatch, case)
+    expected = {"narrow": narrow, "wide": wide, None: FallbackReason.NO_WORKLOAD}[serving]
+    assert table.lookup(_point(case, n_tokens))[2] is expected
+
+
+def test_a_range_kernel_is_warm_only_once_it_ran(monkeypatch) -> None:
+    """Inside a graph capture a range's kernel serves only after an eager call of its own: once 2400 ran (the 3.0x
+    kernel), 2500 is served, 3000 (the 2.0x kernel, never run) is not warm."""
+    case = OpCase.of("fused_moe@1.0")
+    table, narrow, _ = _narrow_and_wide(monkeypatch, case)
+    _, match, runnable = table.lookup(_point(case, 2400))
+    assert runnable is narrow
+    table.warmed_keys.add(match)  # as KernelDispatcher.dispatch does after an eager call
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert table.lookup(_point(case, 2500))[2] is narrow
+    assert table.lookup(_point(case, 3000))[2] is FallbackReason.NOT_WARMED

@@ -440,8 +440,9 @@ is decided by those workloads alone, its fallback reason theirs), then by power-
 [2**(b-1), 2**b): a value no workload holds is served only by a kernel whose module sets `RANGE_SAFE = True` (it
 compiles and caches nothing per value of that axis, so an unmeasured value costs no more than a measured one), only
 where every workload of the schema in that range qualifies, and only between the lowest and highest value the schema
-measured there. A schema that is to serve a range therefore measures both its ends: 2**(b-1) and 2**b - 1, or the
-largest count the deployment reaches. `scalars` holds every present scalar input, a
+measured there; of the kernels that may serve a value, the best ranked one does, so a faster kernel measured over a
+narrower part of the range hides no other where only the other was measured around. A schema that is to serve a range
+therefore measures both its ends: 2**(b-1) and 2**b - 1, or the largest count the deployment reaches. `scalars` holds every present scalar input, a
 captured or authored value inside its declared range; it is omitted when the schema has none. `speedup` (over the contract's baseline) and
 `accuracy` are written by CI on every workload or none (a `failed` one may lack `speedup`; it is never dispatched),
 with one complete `kernel.targets` item. `microseconds` records the time behind that `speedup`: the kernel's median
