@@ -70,9 +70,9 @@ class AxisSpec(FrozenModel):
     # a var axis the kernel does not depend on (a KV cache's rows): a schema serving one
     # value serves them all, its workloads' values only what bench runs
     any_size: bool = False
-    # a var axis the kernel serves at any value, matched by power-of-two range: a schema
-    # serving the workloads of one range (values of one bit length) serves every value
-    # in it, as long as each of its workloads there qualifies
+    # a var axis served at its measured values first, then (by a kernel declaring its
+    # classes on it, RANGE_CLASSES) by power-of-two range, class by class: a value no
+    # workload holds only between two qualifying workloads of the schema in its class
     bucketed: bool = False
 
     @model_validator(mode="after")

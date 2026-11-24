@@ -70,7 +70,8 @@ _FLOAT32_SCALE_DISTRIBUTION = LogUniformDistribution(log2_lo="-1", log2_hi="1")
 _E8M0_SCALE_DISTRIBUTION = LogUniformDistribution(log2_lo="-8", log2_hi="8")
 
 # prefill MLA kv_b runs over a whole cached prefix in one call: 342,073 rows at AgentX p90; a prefill's m is any
-# token count, so m is matched by power-of-two range
+# token count, so m is bucketed: an m no workload holds served only by a kernel declaring its classes
+# (RANGE_CLASSES), between two of its qualifying workloads of one class
 _M = axis("Tokens.", 1, 2**20, is_var=True, bucketed=True)
 _N = axis("Output columns.", 16, 262144, multiple_of=16)
 # lm_head under TP8 of a vocabulary divisible by 64 only: Muse Spark's 202048 / 8 = 25256

@@ -55,8 +55,9 @@ KIMI_K3_ATTN_RES = OpContract(
     ),
     op_type="attn_res",
     axes={
-        # vLLM's token count changes from step to step (a prefill chunk, a decode batch): matched by
-        # power-of-two range, which a kernel serves only where its module declares RANGE_SAFE
+        # vLLM's token count changes from step to step (a prefill chunk, a decode batch): bucketed, a
+        # count no workload holds served only by a kernel declaring its classes (RANGE_CLASSES), between
+        # two of its qualifying workloads of one class
         "n_tokens": axis("Tokens.", 1, 65536, is_var=True, bucketed=True),
         "hidden_size": axis("Width of the residual stream.", 256, 8192, multiple_of=256),
         "n_bank_rows": axis("Rows the bank holds per token.", 1, 16),

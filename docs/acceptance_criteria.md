@@ -14,8 +14,10 @@ Your kernel PR or plugin PR must meet these criteria:
 - CI measures each workload and writes its speedup over the baseline into the kernel file.
 - A kernel file can be merged when at least one of its workloads is correct and 5% or more faster. Otherwise
   validation fails with `no_qualifying_workload`.
-- At run time, AKLR uses the kernel only for workloads that are 5% or more faster. Other workloads run the
-  original code.
+- At run time, AKLR uses the kernel for workloads that are 5% or more faster. Other workloads run the original
+  code. For a bucketed axis (a token count) it also uses a kernel at a value no workload holds, but only where the
+  kernel declares its classes on that axis (`RANGE_CLASSES`) and the value lies between two of its workloads of one
+  class, every workload of that class 5% or more faster (`aklr/plugins/aiter/README.md`, Schema fields).
 - The baseline is defined in the op's `baseline.py`. For ops in `aklr/plugins/aiter/`, it is usually the AITER op. For plugin
   ops, it is the original SGLang or vLLM code.
 

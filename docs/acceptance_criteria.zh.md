@@ -14,7 +14,10 @@
 - CI 会测量每个 workload，把相对 baseline 的加速比写进 kernel 文件。
 - 一个 kernel 文件至少有一个 workload 结果正确、且快 5% 或以上，才能合入。否则 validation 报
   `no_qualifying_workload`，不通过。
-- 运行时，AKLR 只在快 5% 或以上的 workload 上使用这个 kernel，其他 workload 运行原来的代码。
+- 运行时，AKLR 在快 5% 或以上的 workload 上使用这个 kernel，其他 workload 运行原来的代码。对按范围分派的轴（token
+  数），没有 workload 的取值也可能用这个 kernel，但只限于：kernel 声明了它在这个轴上的 class 划分（`RANGE_CLASSES`），
+  这个值落在同一个 class 里两个 workload 之间，而且这个 class 里的 workload 都快 5% 或以上（见
+  `aklr/plugins/aiter/README.md` 的 Schema fields）。
 - baseline 写在算子的 `baseline.py` 里。`aklr/plugins/aiter/` 下的算子，baseline 通常是 AITER 的算子；插件算子的 baseline 是
   SGLang 或 vLLM 原来的代码。
 

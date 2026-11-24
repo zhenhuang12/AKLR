@@ -75,7 +75,8 @@ class FastKeyCodec:
     def match_key(self, key: FastKey) -> FastKey:
         """``key`` as kernels are matched: each any_size axis ``None``, so a schema
         serving one value of it serves every value; each bucketed axis its value's bit
-        length, so a schema serving one value of it serves every value of that length."""
+        length, the key of its power-of-two range, which dispatch serves class by class
+        between a kernel's measured values (``DispatchTable.ranges``)."""
         values = list(key)
         for i in self.any_size_indices:
             values[i] = None

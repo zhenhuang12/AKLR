@@ -27,6 +27,10 @@ an engine's call ─> plugin route or aiter provider ─> the api (api.py)
                                                         dispatch reads the call's Point:
                                                         ├─ a schema's workload, accuracy passed, speedup ≥ AKLR_MIN_SPEEDUP
                                                         │    ─> that kernel's run(**call)
+                                                        ├─ an unmeasured value of a bucketed axis, inside a class its
+                                                        │  kernel declares (RANGE_CLASSES) where every workload of the
+                                                        │  schema in that class qualifies, between two of them
+                                                        │    ─> that kernel's run(**call)
                                                         └─ otherwise ─> a FallbackReason: the engine runs its own code
 
 python -m aklr validate <schema>
@@ -47,8 +51,9 @@ python -m aklr validate <schema>
   ([Reference and baseline](#reference-and-baseline)).
 - **Fast**: a workload's `speedup` is a lower bound of the baseline's time over the kernel's, both in a
   CUDA graph (`harness/skills/read-validation/references/ruler.md`). A file needs one workload at the entry
-  threshold (`DEFAULT_MIN_SPEEDUP`, 1.05 by default) or more; dispatch serves only the workloads at
-  `AKLR_MIN_SPEEDUP` (1.05 by default) or more.
+  threshold (`DEFAULT_MIN_SPEEDUP`, 1.05 by default) or more; dispatch serves the workloads at
+  `AKLR_MIN_SPEEDUP` (1.05 by default) or more, and, of a bucketed axis, only the values between such workloads of
+  one class of a kernel declaring its classes ([schema fields](#schema-fields)).
 
 `gemm@1.0`, shortened (`aklr/plugins/aiter/gemm/`):
 
@@ -324,7 +329,9 @@ def run(*, <every name of OpContract.kernel_call_keys>) -> None: ...
   `@triton.jit`) the def is host code whose body must pass SA2 and SA3; choose the config in a compile
   function instead.
 - Compilation happens only on a Point's first call, and that call compiles every variant a scalar value (`beta`)
-  selects under the Point: later calls of the Point may happen inside a CUDA graph capture.
+  selects under the Point: later calls of the Point may happen inside a CUDA graph capture. A kernel declaring
+  classes of a bucketed axis (`RANGE_CLASSES`) compiles once per class: the first call of any value in a class
+  compiles what every value of it runs.
 - Compiled code is cached by shape in a compile function: a module-level def whose single decorator is
   `@functools.cache` or `@functools.lru_cache(...)`. Its own body runs outside the launch checks of SA2 and SA3 and
   may compile and allocate; a def or lambda nested in it (such as the returned `launch`) is launch code under every
@@ -432,7 +439,10 @@ def run(*, a, b, trans_b, bias, out_dtype, out):
 
 A host capturing CUDA graphs calls every Point at least once outside a capture first (sglang does). A Point first
 called inside a capture returns `not_warmed`: its fallback is recorded into the graph, and replays no longer pass
-through dispatch.
+through dispatch. A value served from a class of a bucketed axis is warm once any call of that class (in that
+power-of-two range) ran outside a capture. aklr never calls a kernel module's own `warm_up()`: a kernel is warmed by
+calls through its api, the engine's own (each graph size once, eagerly) and the vLLM plugin's GEMM warm-up (each
+measured `m`, and one value of each class a range serves, past the graph sizes).
 
 ## Inputs and workloads
 
@@ -445,13 +455,14 @@ axes in contract order, sorted by their values, each Point once. A var axis the 
 (the rows of a KV cache, which the kernel does not depend on) is served at every value of its domain: its workload
 values are only the sizes bench runs. A var axis the contract declares `bucketed` (a token count, which a prefill's
 chunk tail or an eager batch makes any value) is served at its measured values first (a value some workload holds
-is decided by those workloads alone, its fallback reason theirs), then by power-of-two range
-[2**(b-1), 2**b): a value no workload holds is served only by a kernel whose module sets `RANGE_SAFE = True` (it
-compiles and caches nothing per value of that axis, so an unmeasured value costs no more than a measured one), only
-where every workload of the schema in that range qualifies, and only between the lowest and highest value the schema
-measured there; of the kernels that may serve a value, the best ranked one does, so a faster kernel measured over a
-narrower part of the range hides no other where only the other was measured around. A schema that is to serve a range
-therefore measures both its ends: 2**(b-1) and 2**b - 1, or the largest count the deployment reaches. `scalars` holds every present scalar input, a
+is decided by those workloads alone, its fallback reason theirs). A value no workload holds is served only by a
+kernel whose entry file declares its classes on the axis (`RANGE_SAFE = True` and `RANGE_CLASSES`, [the kernel
+section](#the-kernel-section-and-abi): one build per class, none per value), class by class within a power-of-two
+range [2**(b-1), 2**b): only where the schema measured workloads in the value's class of that range, every one of
+them qualifying, and only between the lowest and highest of them. Of the kernels' classes that may serve a value,
+the best ranked one does, so a faster kernel measured over a narrower part hides no other where only the other was
+measured around. A kernel that declares no classes serves its measured values alone, whatever `RANGE_SAFE` says. A
+schema that is to serve a class of a range therefore measures both its ends there. `scalars` holds every present scalar input, a
 captured or authored value inside its declared range; it is omitted when the schema has none. `speedup` (over the contract's baseline) and
 `accuracy` are written by CI on every workload or none (a `failed` one may lack `speedup`; it is never dispatched),
 with one complete `kernel.targets` item. `microseconds` records the time behind that `speedup`: the kernel's median
