@@ -6,11 +6,12 @@
 An AKLR kernel compiles at its first eager call. vLLM's warmup runs each CUDA graph size
 eagerly once; a step with more tokens, or the LM head (which runs outside the graphs), would
 first reach its kernels while serving, and stall every request in that step. This calls each
-of those kernels once on scratch operands, for the weight shapes the worker's model and drafter
-hold (the dispatch table is the device's, any model's): no other kernel is built, and no scratch
-call is recorded as a workload. It runs no model step: a dummy step after vLLM's warmup leaves
-Kimi-K3 on vLLM's v2 model runner (linear attention, DSpark drafter) wrong at every decode step
-after it."""
+of those kernels once on scratch operands, at each measured m and once in each class a range
+serves, for the weight shapes the worker's model and drafter hold (the dispatch table is the
+device's, any model's): no other kernel is built, and no scratch call is recorded as a workload.
+aklr calls no kernel module's own warm_up(): a kernel is warmed by calling it through its api. It
+runs no model step: a dummy step after vLLM's warmup leaves Kimi-K3 on vLLM's v2 model runner
+(linear attention, DSpark drafter) wrong at every decode step after it."""
 
 from __future__ import annotations
 
@@ -37,12 +38,26 @@ def _gemm_dispatcher() -> Any:
 
 
 def _served_gemm_points(dispatcher: Any) -> list[Any]:
-    """The Points of the committed GEMM kernels this device serves at a measured m. A range's key (m bucketed, its
-    value ``('bucket', bit length)``) is no one m and makes no Point: it is left out before ``to_point``."""
+    """The Points of the committed GEMM kernels this device serves: every measured m, then, for each class of a
+    kernel a range serves (``DispatchTable.ranges``), one m no workload holds that dispatch serves from it, so that
+    the class is built and warm before a request or a graph capture first reaches it."""
     codec = FastKeyCodec.from_contract(dispatcher.contract)
-    keys = dispatcher.table.runnables
-    measured = [key for key in keys if not any(isinstance(key[i], tuple) for i in codec.bucketed_indices)]
-    return [codec.to_point(key) for key in measured]
+    table = dispatcher.table
+    points = [codec.to_point(key) for key in table.runnables]
+    (i,) = codec.bucketed_indices or (None,)
+    for range_key, candidates in table.ranges.items():
+        for candidate in candidates:
+            ((lo, hi),) = candidate.span
+            for m in range(lo, hi + 1):
+                key = (*range_key[:i], m, *range_key[i + 1 :])
+                exact = codec.exact_key(key)
+                if exact in table.runnables or exact in table.fallback_reasons:
+                    continue  # a measured m: its own workloads decide it
+                # the class serves m where no candidate ranked before it does
+                if next(c for c in candidates if c.span[0][0] <= m <= c.span[0][1]) is candidate:
+                    points.append(codec.to_point(key))
+                    break
+    return points
 
 
 def _weight_shapes(worker: Any) -> set[tuple[int, int]]:

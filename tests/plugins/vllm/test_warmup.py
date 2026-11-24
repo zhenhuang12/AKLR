@@ -88,18 +88,26 @@ def test_the_recorder_comes_back_when_a_call_fails(served, monkeypatch):
     assert served.dispatcher.recorder == "recorder"
 
 
-def test_the_served_points_leave_out_a_ranges_key():
-    """With gemm's m bucketed, a RANGE_SAFE kernel's table keys its range beside its measured m: only the measured m
-    become Points (a range's key is no one m, and PointSpec takes no such m)."""
-    from aklr.core.contract.fastkey import FastKeyCodec
+def test_the_served_points_hold_every_measured_m_and_a_call_for_each_class_a_range_serves(monkeypatch):
+    """gemm measured at m 16 and 20 (the first class of its kernel, up to 24) and 26 and 30 (the second), all in
+    [16, 32): the warm-up calls each measured m, and one m no workload holds in each class, 17 and 27, which dispatch
+    serves from that class's range: without it, the first such call of a class would build it while serving, or fall
+    back inside a graph capture."""
+    import sys
+    import types
+
+    from aklr.core.runtime.dispatch import DispatchTable
     from tests.op_case import OpCase
 
+    module = types.ModuleType("tests_warmup_classes")
+    module.RANGE_SAFE, module.RANGE_CLASSES = True, {"m": (24, 2**20)}
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    runnable = SimpleNamespace(metadata=SimpleNamespace(misc={"module_name": module.__name__}))
     case = OpCase.of("gemm@1.0")
-    codec = FastKeyCodec.from_contract(case.contract)
-    measured = codec.exact_key(codec.to_fast_key(case.point))
-    ranged = codec.match_key(codec.to_fast_key(case.point))
-    assert measured != ranged
-    dispatcher = SimpleNamespace(
-        contract=case.contract, table=SimpleNamespace(runnables={measured: 0, ranged: 0})
+    measured = [{"axes": {"m": m}, "accuracy": "passed", "speedup": 2.0} for m in (16, 20, 26, 30)]
+    schema = case.contract.narrow(case.point, workloads=measured, kernel=case.schema().kernel)
+    table = DispatchTable.from_schemas(
+        case.contract, torch.device("cpu"), [(schema, runnable, schema.workloads)], min_speedup=1.0
     )
-    assert [p.axes["m"] for p in warmup._served_gemm_points(dispatcher)] == [case.point.axes["m"]]
+    dispatcher = SimpleNamespace(contract=case.contract, table=table)
+    assert sorted(p.axes["m"] for p in warmup._served_gemm_points(dispatcher)) == [16, 17, 20, 26, 27, 30]
