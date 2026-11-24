@@ -244,11 +244,11 @@ class TestKernelDispatcher:
         served: bool,
     ) -> None:
         """A bucketed axis's value no workload holds is served by its range only inside the axis's bounds:
-        gemm measured at m 4 and 7 (the range [4, 8)) by a RANGE_SAFE kernel serves m 5; m 0 (below m's
-        lowest) and 2**20 + 1 (above its highest) are out of contract."""
+        gemm measured at m 4 and 7 (the range [4, 8)) by a kernel of one class over m serves m 5; m 0 (below
+        m's lowest) and 2**20 + 1 (above its highest) are out of contract."""
         monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)  # no device needed
         case = OpCase.of("gemm@1.0")
-        schema = case.schema("RANGE_SAFE = True\n\n\n" + GEMM_KERNEL_SOURCE)
+        schema = case.schema('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (2**20,)}\n\n\n' + GEMM_KERNEL_SOURCE)
         workloads = tuple(
             case.contract.workload_for(
                 case.point.model_copy(update={"axes": {**case.point.axes, "m": n}}), {}
@@ -274,12 +274,14 @@ class TestKernelDispatcher:
         n_plan_rows: int,
         served: bool,
     ) -> None:
-        """topk_transform_paged measured at 4 and 7 tokens (the range [4, 8)) by a RANGE_SAFE kernel serves 5
-        tokens with 6 plan rows; with 7 (n_plan_rows == n_tokens + 1 fails) the call is out of contract."""
+        """topk_transform_paged measured at 4 and 7 tokens (the range [4, 8)) by a kernel of one class over
+        n_tokens serves 5 tokens with 6 plan rows; with 7 (n_plan_rows == n_tokens + 1 fails) the call is out of
+        contract."""
         monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)  # no device needed
         case = OpCase.of("topk_transform_paged@1.0")
         schema = case.schema(
-            "RANGE_SAFE = True\n\n\ndef run(*, out_page_indices, **_):\n    out_page_indices.fill_(-1)\n"
+            'RANGE_SAFE = True\nRANGE_CLASSES = {"n_tokens": (65536,)}\n\n\n'
+            "def run(*, out_page_indices, **_):\n    out_page_indices.fill_(-1)\n"
         )
         workloads = tuple(
             case.contract.workload_for(

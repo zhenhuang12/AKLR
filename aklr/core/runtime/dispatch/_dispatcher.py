@@ -5,11 +5,12 @@
 from __future__ import annotations
 
 import ast
+import bisect
 import functools
 import inspect
 import logging
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Final, NamedTuple
@@ -77,27 +78,64 @@ _FALLBACK_PRECEDENCE: Final = (
 )
 
 
-def _is_range_safe(runnable: Runnable) -> bool:
-    """Whether the kernel's module sets ``RANGE_SAFE = True``: it builds no variant per value of a bucketed axis
-    (a launch cached per token count compiles on every new one while serving), so a range's unmeasured values cost
-    no more than its measured ones."""
+def _range_classes(runnable: Runnable, axes: tuple[str, ...]) -> tuple[tuple[int, ...], ...] | None:
+    """Per bucketed axis (``axes``), the upper bounds of the kernel's classes on it, as its module declares them:
+    ``RANGE_SAFE = True`` (it builds one variant per class, none per value) and ``RANGE_CLASSES``, each bucketed
+    axis's ascending inclusive upper bounds (a class runs from above the bound before it, the first from the axis's
+    lowest value). None without both, or where they do not read so (audit's SA6 rejects such a declaration): the
+    kernel serves its measured values alone."""
     metadata = getattr(runnable, "metadata", None)
     name = None if metadata is None else metadata.misc.get("module_name")
-    return bool(getattr(sys.modules.get(name) if name else None, "RANGE_SAFE", False))
+    module = sys.modules.get(name) if name else None
+    declared = getattr(module, "RANGE_CLASSES", None)
+    if getattr(module, "RANGE_SAFE", False) is not True or not isinstance(declared, Mapping):
+        return None
+    if set(declared) != set(axes):
+        return None
+    bounds = tuple(declared[a] for a in axes)
+    for b in bounds:
+        if not (isinstance(b, tuple) and b and all(type(x) is int for x in b)):
+            return None
+        if any(x >= y for x, y in zip(b, b[1:], strict=False)):
+            return None
+    return bounds
 
 
-# per bucketed axis, the lowest and highest value a schema measured in a range
+def _class_of(
+    classes: tuple[tuple[int, ...], ...], key: FastKey, indices: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    """Per bucketed axis, the index of the class ``key``'s value falls in; None above an axis's last class."""
+    found = tuple(bisect.bisect_left(bounds, key[i]) for bounds, i in zip(classes, indices, strict=True))
+    return None if any(c == len(bounds) for c, bounds in zip(found, classes, strict=True)) else found
+
+
+def _note_reasons(
+    reasons: dict[FastKey, FallbackReason], key: FastKey, failing: Iterable[WorkloadSpec]
+) -> None:
+    """Each failing workload's reason at ``key``, the first in _FALLBACK_PRECEDENCE kept."""
+    for workload in failing:
+        if workload.accuracy == "failed":
+            reason = FallbackReason.INACCURATE
+        elif workload.speedup is None:
+            reason = FallbackReason.NOT_MEASURED
+        else:
+            reason = FallbackReason.NOT_QUALIFIED
+        reasons[key] = min(reasons.get(key, reason), reason, key=_FALLBACK_PRECEDENCE.index)
+
+
+# per bucketed axis, the lowest and highest value a schema measured in a range's class
 _Span = tuple[tuple[int, int], ...]
 
 
 class _RangeCandidate(NamedTuple):
-    """A RANGE_SAFE kernel serving a power-of-two range of a bucketed axis."""
+    """A kernel serving one of its classes within a power-of-two range of a bucketed axis."""
 
-    # an unmeasured value is served only inside its span (a kernel's tile classes end at its last measured value,
-    # past which it may build per value or not run at all)
+    # an unmeasured value is served only inside its span, the values its schema measured in that class of the range
+    # (a kernel's tile classes end at its last measured value, past which it may build per value or not run at all)
     span: _Span
     runnable: Runnable
-    # what a call of it marks warm: (the range key, its place in the range), one per kernel of the range
+    # what a call of it marks warm: (the range key, its place in the range), one per class of a kernel: an eager call
+    # in the class builds what every value of it runs
     warm_key: FastKey
 
 
@@ -105,7 +143,7 @@ class _RangeCandidate(NamedTuple):
 class DispatchTable:
     """One contract's committed kernels on one device, keyed by each Point's FastKey as
     ``match_key`` (``FastKeyCodec.match_key``) leaves it; with a bucketed axis, by each
-    workload's own value (``exact_key``) and, for RANGE_SAFE kernels, by range (``ranges``)."""
+    workload's own value (``exact_key``) and, for kernels declaring their classes, by range (``ranges``)."""
 
     # the closures FastKeyFnGenerator and AllocOutputsFnGenerator make
     fast_key: Callable[[CallArgs], FastKey | None]
@@ -118,8 +156,9 @@ class DispatchTable:
     # a contract with a bucketed axis: a call's exact key (``FastKeyCodec.exact_key``), which alone decides a call
     # some workload was measured at (served where one qualifies, else its reason); None without one
     exact_key: Callable[[FastKey], FastKey] | None = None
-    # a range key (``match_key`` with a bucketed axis) -> each RANGE_SAFE kernel whose schema qualifies at all its
-    # workloads in the range, best ranked first: a value no workload holds takes the first whose span holds it
+    # a range key (``match_key`` with a bucketed axis) -> each class of each kernel declaring its classes
+    # (``_range_classes``) whose schema qualifies at all its workloads in that class of the range, best ranked first:
+    # a value no workload holds takes the first whose span holds it
     ranges: dict[FastKey, tuple[_RangeCandidate, ...]] = field(default_factory=dict)
     bucketed_indices: tuple[int, ...] = ()
 
@@ -135,53 +174,50 @@ class DispatchTable:
         """The table serving, per Point of the given workloads."""
         codec = FastKeyCodec.from_contract(contract)
         best: dict[FastKey, tuple[tuple[bool, float, str], Runnable]] = {}
-        # a range key -> (rank, span, runnable) of each kernel serving it
+        # a range key -> (rank, span, runnable) of each kernel's class serving it
         in_range: dict[FastKey, list[tuple[tuple[bool, float, str], _Span, Runnable]]] = {}
         fallback_reasons: dict[FastKey, FallbackReason] = {}
-        bucketed = bool(codec.bucketed_indices)
+        indices = codec.bucketed_indices
+        bucketed = bool(indices)
+        axes = tuple(tuple(contract.domain.axes)[i] for i in indices)
         for schema, runnable, workloads in schema_runnables:
             # workloads differing in any_size axes alone share a key: the schema serves it
             # only if each of them qualifies, at the lowest rank among them; with a bucketed
-            # axis, each workload's own value is a key, served before its range's, which a
-            # kernel serves only if it declares RANGE_SAFE (``_is_range_safe``)
-            ranges = not bucketed or _is_range_safe(runnable)
+            # axis, each workload's own value is a key, served before its range's, which only a
+            # kernel declaring its classes serves (``_range_classes``), class by class
+            classes = _range_classes(runnable, axes) if bucketed else None
             keyed: dict[FastKey, list[WorkloadSpec]] = {}
-            measured: dict[FastKey, list[FastKey]] = {}  # a range key -> the measured keys in it
+            # (a range key, a class of the kernel in it) -> its workloads, with their keys
+            cells: dict[tuple[FastKey, tuple[int, ...]], list[tuple[FastKey, WorkloadSpec]]] = {}
             for workload in workloads:
                 fast_key = codec.to_fast_key(schema.point(workload.axes))
-                if ranges:
+                if not bucketed:
                     keyed.setdefault(codec.match_key(fast_key), []).append(workload)
-                    if bucketed:
-                        measured.setdefault(codec.match_key(fast_key), []).append(fast_key)
-                if bucketed:
-                    keyed.setdefault(codec.exact_key(fast_key), []).append(workload)
+                    continue
+                keyed.setdefault(codec.exact_key(fast_key), []).append(workload)
+                in_class = None if classes is None else _class_of(classes, fast_key, indices)
+                if in_class is not None:
+                    cells.setdefault((codec.match_key(fast_key), in_class), []).append((fast_key, workload))
             for key, same in keyed.items():
                 failing = [w for w in same if not w.qualifies(min_speedup)]
                 if not failing:
                     rank = min(map(schema.rank_key, same))
-                    if key in measured:
-                        # a range keeps every kernel serving it, each with its span: one ranked higher
-                        # over a narrower span hides no other where only the other was measured around
-                        span = tuple(
-                            (min(k[i] for k in measured[key]), max(k[i] for k in measured[key]))
-                            for i in codec.bucketed_indices
-                        )
-                        in_range.setdefault(key, []).append((rank, span, runnable))
                     # strict: an equal rank shares a content hash, i.e.
-                    elif key not in best or rank > best[key][0]:
+                    if key not in best or rank > best[key][0]:
                         best[key] = (rank, runnable)
-                for workload in failing:
-                    if workload.accuracy == "failed":
-                        reason = FallbackReason.INACCURATE
-                    elif workload.speedup is None:
-                        reason = FallbackReason.NOT_MEASURED
-                    else:
-                        reason = FallbackReason.NOT_QUALIFIED
-                    fallback_reasons[key] = min(
-                        fallback_reasons.get(key, reason),
-                        reason,
-                        key=_FALLBACK_PRECEDENCE.index,
+                _note_reasons(fallback_reasons, key, failing)
+            # a range keeps every class of every kernel serving it, each with its span, where each workload of the
+            # schema in that class of the range qualifies: one ranked higher over a narrower span hides no other
+            # where only the other was measured around; a failing class's reasons are its range's
+            for (key, _), members in cells.items():
+                failing = [w for _, w in members if not w.qualifies(min_speedup)]
+                if not failing:
+                    span = tuple(
+                        (min(k[i] for k, _ in members), max(k[i] for k, _ in members)) for i in indices
                     )
+                    rank = min(schema.rank_key(w) for _, w in members)
+                    in_range.setdefault(key, []).append((rank, span, runnable))
+                _note_reasons(fallback_reasons, key, failing)
         served_ranges = {
             key: tuple(
                 _RangeCandidate(span, runnable, (key, i))
