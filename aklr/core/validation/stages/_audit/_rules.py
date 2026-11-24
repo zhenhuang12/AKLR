@@ -231,6 +231,74 @@ class _AklrImportRule(SourceRule):
                     yield Rejection.from_node(source.path, node, f"imports {name}")
 
 
+class _RangeClassesRule(SourceRule):
+    """RANGE_CLASSES, which lets dispatch serve the unmeasured values of a bucketed axis class by class (beside
+    RANGE_SAFE = True: one build per class, none per value), is read as declared: a literal of each of the contract's
+    bucketed axes' ascending inclusive class upper bounds inside the axis, assigned once in the entry file, every
+    workload's value in a class. Whether the bounds are the kernel's own classes is review's to check."""
+
+    number = 6
+
+    def kernel_rejections(self, kernel_sources: KernelSources) -> Iterable[Rejection]:
+        path = kernel_sources.entry_path
+        if path not in kernel_sources.parsed_sources:
+            return
+        assigned: dict[str, list[ast.AST]] = {"RANGE_SAFE": [], "RANGE_CLASSES": []}
+        for node in kernel_sources.parsed_sources[path].tree.body:
+            targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in assigned:
+                    assigned[target.id].append(node)
+        if not assigned["RANGE_CLASSES"]:
+            return
+        node, *again = assigned["RANGE_CLASSES"]
+        if again:
+            yield Rejection.from_node(path, again[0], "assigns RANGE_CLASSES more than once")
+            return
+        if not (
+            len(assigned["RANGE_SAFE"]) == 1
+            and isinstance(assigned["RANGE_SAFE"][0], ast.Assign)
+            and isinstance(assigned["RANGE_SAFE"][0].value, ast.Constant)
+            and assigned["RANGE_SAFE"][0].value.value is True
+        ):
+            yield Rejection.from_node(path, node, "RANGE_CLASSES without RANGE_SAFE = True")
+            return
+        try:
+            declared = ast.literal_eval(node.value) if isinstance(node, ast.Assign) else None
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            declared = None
+        if not isinstance(declared, dict):
+            yield Rejection.from_node(path, node, "RANGE_CLASSES is not a literal dict")
+            return
+        axes = kernel_sources.range_axes
+        if set(declared) != set(axes):
+            what = f"RANGE_CLASSES names {sorted(map(str, declared))}: the contract's bucketed axes are"
+            yield Rejection.from_node(path, node, f"{what} {', '.join(sorted(axes)) or 'none'}")
+            return
+        for axis, bounds in sorted(declared.items()):
+            lo, hi, values = axes[axis]
+            if not (
+                isinstance(bounds, tuple)
+                and bounds
+                and all(type(b) is int for b in bounds)
+                and all(x < y for x, y in zip(bounds, bounds[1:], strict=False))
+            ):
+                yield Rejection.from_node(
+                    path, node, f"RANGE_CLASSES[{axis!r}] is not an ascending tuple of ints"
+                )
+                continue
+            outside = [b for b in bounds if not lo <= b <= hi]
+            if outside:
+                what = f"RANGE_CLASSES[{axis!r}] bound {outside[0]} is outside {axis}'s {lo}..{hi}"
+                yield Rejection.from_node(path, node, what)
+            past = sorted(v for v in values if v > bounds[-1])
+            if past:
+                what = (
+                    f"workload {axis}={past[0]} is in no class: RANGE_CLASSES[{axis!r}] ends at {bounds[-1]}"
+                )
+                yield Rejection.from_node(path, node, what)
+
+
 SOURCE_RULES: Final = (
     _ParseRule(),
     _GlobalStatementRule(),
@@ -238,4 +306,5 @@ SOURCE_RULES: Final = (
     _SideEffectRule(),
     _EntryRule(),
     _AklrImportRule(),
+    _RangeClassesRule(),
 )

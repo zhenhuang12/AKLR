@@ -496,7 +496,7 @@ class TestAuditStage:
         assert {f.code.value for f in report.findings} == codes
 
     def test_hip_kernel_takes_the_sh_rules(self, tmp_path: Path) -> None:
-        """A hip schema's kernel is audited by SH0-SH5, not SA0-SA5."""
+        """A hip schema's kernel is audited by SH0-SH5, not SA0-SA6."""
         case = OpCase.of("gemm@1.0")
         source = HIP_GEMM_KERNEL_SOURCE.replace(_LAUNCH, '    (void)getenv("X");\n' + _LAUNCH)
         schema = case.schema(source, language="hip")
@@ -509,7 +509,7 @@ class TestAuditStage:
         assert finding.detail.startswith("SH3 kernel.hip:")
 
     def test_hsaco_kernel_takes_the_sa_and_sc_rules(self, tmp_path: Path) -> None:
-        """An hsaco schema's kernel is audited by SA0-SA5, then SC1-SC2."""
+        """An hsaco schema's kernel is audited by SA0-SA6, then SC1-SC2."""
         case = OpCase.of("gemm@1.0")
         source = HSACO_GEMM_KERNEL_SOURCE.replace(
             "import struct\n", "import ctypes\nimport struct\n"
@@ -522,3 +522,66 @@ class TestAuditStage:
         findings = AuditStage().run(scope, None).findings
         assert {f.code.value for f in findings} == {"source_rejected"}
         assert sorted(f.detail.split(" kernel.py:")[0] for f in findings) == ["SA2", "SC1"]
+
+
+@pytest.mark.parametrize(
+    ("declaration", "ms", "rejected"),
+    [
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (8, 1048576)}', [4, 8, 300], None),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (1048576,)}', [4, 1024], None),
+        ("RANGE_SAFE = True", [4, 1024], None),
+        ('RANGE_CLASSES = {"m": (8,)}', [4], "without RANGE_SAFE = True"),
+        ('RANGE_SAFE = False\nRANGE_CLASSES = {"m": (8,)}', [4], "without RANGE_SAFE = True"),
+        ("RANGE_SAFE = True\nRANGE_CLASSES = dict(m=(8,))", [4], "not a literal"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"n": (16,)}', [4], "the contract's bucketed axes are m"),
+        ("RANGE_SAFE = True\nRANGE_CLASSES = {}", [4], "the contract's bucketed axes are m"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (8, 8)}', [4], "ascending tuple of ints"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": [8]}', [4], "ascending tuple of ints"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (0, 8)}', [4], "outside m's 1..1048576"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (8, 2097152)}', [4], "outside m's 1..1048576"),
+        ('RANGE_SAFE = True\nRANGE_CLASSES = {"m": (8,)}', [4, 16], "workload m=16 is in no class"),
+        (
+            'RANGE_SAFE = True\nRANGE_CLASSES = {"m": (8,)}\nRANGE_CLASSES = {"m": (16,)}',
+            [4],
+            "more than once",
+        ),
+    ],
+    ids=[
+        "two_classes",
+        "one_class_over_the_axis",
+        "range_safe_alone",
+        "without_range_safe",
+        "range_safe_false",
+        "not_a_literal",
+        "another_axis",
+        "no_axis",
+        "not_ascending",
+        "a_list",
+        "a_bound_below_the_axis",
+        "a_bound_above_the_axis",
+        "a_workload_past_the_last_class",
+        "assigned_twice",
+    ],
+)
+def test_a_class_declaration_holds_together(
+    tmp_path: Path, declaration: str, ms: list[int], rejected: str | None
+) -> None:
+    """SA6: RANGE_CLASSES, which lets dispatch serve a bucketed axis's unmeasured values class by class, is a literal
+    of the contract's bucketed axes' ascending class bounds inside each axis, declared once beside RANGE_SAFE = True,
+    every workload's value in a class; RANGE_SAFE alone declares nothing to check."""
+    case = OpCase.of("gemm@1.0")
+    source = f'"""K."""\n{declaration}\n\n\n{_SIGNATURE}\n    out.copy_(a @ b.mT)\n'
+    schema = case.contract.narrow(
+        case.point, workloads=[{"axes": {"m": m}} for m in ms], kernel=case.schema(source).kernel
+    )
+    path = tmp_path / "aklr/ops" / case.contract.op_type / schema.relative_path()
+    path.parent.mkdir(parents=True)
+    path.write_text(schema.schema_text(), encoding="utf-8")
+    scope = ValidationScope(tmp_path, "", None, (path.resolve(),), ())
+    findings = AuditStage().run(scope, None).findings
+    if rejected is None:
+        assert findings == ()
+    else:
+        (finding,) = findings
+        assert finding.code.value == "source_rejected"
+        assert finding.detail.startswith("SA6 kernel.py:") and rejected in finding.detail

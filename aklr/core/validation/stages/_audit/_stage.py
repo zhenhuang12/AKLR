@@ -6,7 +6,7 @@ from __future__ import annotations
 import ast
 import functools
 import json
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from itertools import starmap
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -78,6 +78,12 @@ class AuditStage(PipelineStage[AuditReport]):
             return []
         if schema.kernel.language == "hip":
             return list(check_hip_kernel(schema_path, schema.kernel))
+        # each bucketed axis: its bounds and the workloads' values, which a RANGE_CLASSES declaration must hold (SA6)
+        range_axes = {
+            name: (a.lo, a.hi, tuple(w.axes[name] for w in schema.workloads if name in w.axes))
+            for name, a in contract.axes.items()
+            if a.bucketed
+        }
         findings = list(
             check_kernel(
                 schema_path,
@@ -85,6 +91,7 @@ class AuditStage(PipelineStage[AuditReport]):
                 call_keys=schema.kernel_call_keys,
                 tensor_names=tuple(contract.tensors()),
                 mutable_names=tuple(contract.mutable_tensors),
+                range_axes=range_axes,
             )
         )
         if schema.kernel.language == "hsaco":
@@ -148,10 +155,12 @@ def check_kernel(
     call_keys: Collection[str],
     tensor_names: Collection[str],
     mutable_names: Collection[str],
+    range_axes: Mapping[str, tuple[int, int, tuple[int, ...]]] | None = None,
 ) -> tuple[Finding, ...]:
-    """Every SA0-SA5 rejection of the kernel of the schema at ``schema_path``."""
+    """Every SA0-SA6 rejection of the kernel of the schema at ``schema_path``; ``range_axes``: each bucketed axis of
+    its contract, (lowest, highest, the workloads' values)."""
     try:
-        kernel_sources = KernelSources(kernel, call_keys, tensor_names, mutable_names)
+        kernel_sources = KernelSources(kernel, call_keys, tensor_names, mutable_names, range_axes)
         parsed_sources = kernel_sources.parsed_sources
         reached = kernel_sources.reach()
         node_args = [
@@ -226,9 +235,12 @@ class KernelSources:
         call_keys: Collection[str],
         tensor_names: Collection[str],
         mutable_names: Collection[str],
+        range_axes: Mapping[str, tuple[int, int, tuple[int, ...]]] | None = None,
     ) -> None:
         self.kernel = kernel
         self.call_keys = tuple(call_keys)
+        # each bucketed axis of the contract: (lowest, highest, the workloads' values) (SA6)
+        self.range_axes = dict(range_axes or {})
         self.tensor_names = frozenset(tensor_names)
         # what the kernel must not write: all but the outputs and the mutable inputs
         self.input_names = self.tensor_names - frozenset(mutable_names)

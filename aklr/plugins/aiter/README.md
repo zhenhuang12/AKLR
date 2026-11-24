@@ -30,7 +30,7 @@ an engine's call ─> plugin route or aiter provider ─> the api (api.py)
                                                         └─ otherwise ─> a FallbackReason: the engine runs its own code
 
 python -m aklr validate <schema>
-  audit: the kernel's sources keep to the rules (SA0–SA5)
+  audit: the kernel's sources keep to the rules (SA0–SA6)
   bench, per workload, on inputs drawn from the contract:
     the kernel's outputs  against  reference.reference(...), judged by reference.check  ─> accuracy
     the kernel's time     against  baseline.baseline(...),   both timed by baseline.profile ─> speedup
@@ -354,7 +354,16 @@ def run(*, <every name of OpContract.kernel_call_keys>) -> None: ...
   globals and fails to compile a plain `BLOCK = 64` or an annotated `BLOCK: tl.constexpr = 64` read inside the
   kernel. Pass such a value as a `tl.constexpr` parameter (`_k[grid](..., BLOCK=BLOCK)`) or write it inside the
   device function.
-- The authority is `aklr/core/validation/stages/_audit/_rules.py`, whose rules SA0–SA5 every source must pass
+- A kernel whose builds follow classes of a bucketed axis (its compiled variants are chosen by ranges of the token
+  count, none built per value) declares them in its entry file, so that dispatch may serve the axis's unmeasured
+  values (a `bucketed` axis, [schema fields](#schema-fields)): `RANGE_SAFE = True`, one build per class and none per value, and
+  `RANGE_CLASSES = {"m": (64, 512, 4096, 1048576)}`, each bucketed axis's ascending inclusive class upper bounds
+  (a class runs from above the bound before it, the first from the axis's lowest value; one bound at the axis's
+  highest value is one build for the whole axis). Audit reads `RANGE_CLASSES` as a literal of the contract's
+  bucketed axes, assigned once beside `RANGE_SAFE = True`, each bound inside its axis and every workload's value
+  in a class (SA6); whether the bounds are the kernel's own classes is review's to check. `RANGE_SAFE` without
+  `RANGE_CLASSES` lets dispatch serve nothing it would not serve without it.
+- The authority is `aklr/core/validation/stages/_audit/_rules.py`, whose rules SA0–SA6 every source must pass
   before it reaches a GPU; a source too deeply nested to audit (a few thousand chained operators) is rejected
   (SA0).
 
@@ -378,7 +387,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   `Tensor(a!)`, and it returns `()`: aklr calls it as `run(**call)`, and the rules of `run` hold (it writes the
   preallocated outputs and the mutable inputs, reads its other inputs only and keeps nothing across calls).
 - Launch on `at::hip::getCurrentHIPStream()`; allocate scratch with `at::empty` on an argument's device.
-- Audit applies SH0–SH5 (`aklr/core/validation/stages/_audit/_hip.py`) instead of SA0–SA5, on the text with
+- Audit applies SH0–SH5 (`aklr/core/validation/stages/_audit/_hip.py`) instead of SA0–SA6, on the text with
   comments and literals blanked: no unterminated comment or literal (SH0); the one registration above, in the entry
   file, and no other library macro (SH1: a second library of one namespace aborts the process that loads it);
   includes are sources, `hip/`, `ATen/`, `c10/`, `torch/library.h` or a listed standard header (SH2); no
@@ -414,7 +423,7 @@ def run(*, a, b, trans_b, bias, out_dtype, out):
   launches, and memory shared between ranks are not supported; kernels that need them require changes to
   `aklr/core/jit/hsaco.py`, or for shared memory, to the op's `OpBaseline.setup`.
 - `requires` pins the HIP that loads the code objects, such as `{"hip": ">=7.15"}`.
-- Sources are audited like other Python kernels (SA0–SA5), then by SC1–SC2
+- Sources are audited like other Python kernels (SA0–SA6), then by SC1–SC2
   (`aklr/core/validation/stages/_audit/_hsaco.py`), so that kernel code reaches the GPU only through the launcher.
   SC1 limits imports to sibling sources, `aklr.core.jit.hsaco`, `torch`, and a few standard modules with no side
   effects. SC2 rejects `__import__`, `eval`, `exec`, `compile`, `globals`, `vars`, and the torch APIs that reach
