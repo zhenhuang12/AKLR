@@ -256,22 +256,24 @@ class DispatchTable:
         key = self.fast_key(call)
         if key is None:
             return None, None, FallbackReason.OUT_OF_CONTRACT
-        runnable = exact = None
-        if self.exact_key is not None:
-            match = exact = self.exact_key(key)
-            runnable = self.runnables.get(match)
-        # a value a workload measured is decided by it alone: its range serves only values no workload holds
-        if runnable is None and exact not in self.fallback_reasons:
+        if self.exact_key is None:
+            # no bucketed axis: one key, as before ranges
             match = self.match_key(key)
             runnable = self.runnables.get(match)
-            # a range: its best kernel whose schema measured values on both sides of the call's
-            for candidate in self.ranges.get(match, ()):
-                if all(
-                    lo <= key[i] <= hi
-                    for i, (lo, hi) in zip(self.bucketed_indices, candidate.span, strict=True)
-                ):
-                    match, runnable = candidate.warm_key, candidate.runnable
-                    break
+        else:
+            # a value a workload measured is decided by it alone: its range serves only values no workload holds
+            match = self.exact_key(key)
+            runnable = self.runnables.get(match)
+            if runnable is None and match not in self.fallback_reasons:
+                match = self.match_key(key)
+                # a range: its best kernel whose schema measured values on both sides of the call's
+                for candidate in self.ranges.get(match, ()):
+                    if all(
+                        lo <= key[i] <= hi
+                        for i, (lo, hi) in zip(self.bucketed_indices, candidate.span, strict=True)
+                    ):
+                        match, runnable = candidate.warm_key, candidate.runnable
+                        break
         if runnable is None:
             reason = self.fallback_reasons.get(match) or (
                 FallbackReason.NO_WORKLOAD
