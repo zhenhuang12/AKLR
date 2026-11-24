@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from aklr.core.contract.op import OpContract
 from aklr.core.contract.semantics import (
-    DeterminismLevel,
+    MOE_MXFP4_SNR,
     DType,
     E8M0Scales,
     FiniteDistribution,
@@ -28,6 +28,7 @@ from aklr.core.contract.semantics import (
 )
 from aklr.core.contract.spec import (
     CompareSpec,
+    DeterminismLevel,
     DTypeSpec,
     LayoutFact,
     LayoutVariant,
@@ -36,6 +37,20 @@ from aklr.core.contract.spec import (
     attr,
     axis,
     derived_axis,
+)
+from aklr.plugins.sglang.models.qwen2_moe.baseline import (
+    Qwen2MoeFp8ExpertsBaseline,
+    Qwen2MoeFp8RouterExpertsBaseline,
+    Qwen2MoeMxfp4MoeBaseline,
+    Qwen2MoeMxfp4RouterExpertsBaseline,
+    Qwen2MoeRouterBaseline,
+)
+from aklr.plugins.sglang.models.qwen2_moe.reference import (
+    Qwen2MoeFp8ExpertsReference,
+    Qwen2MoeFp8RouterExpertsReference,
+    Qwen2MoeMxfp4MoeReference,
+    Qwen2MoeMxfp4RouterExpertsReference,
+    Qwen2MoeRouterReference,
 )
 
 __all__ = [
@@ -189,15 +204,18 @@ QWEN2_MOE_ROUTER = OpContract(
             error_bounds=ToleranceBound(absolute_tolerance=1e-6, relative_tolerance=2**-4),
         ),
         # exact, but two experts whose logits are adjacent bf16 values may swap, for the
-        # same rounding (qwen2_moe_router_id_scores)
+        # same rounding (Qwen2MoeRouterReference.check)
         "topk_ids": TensorSpec(
             description="The chosen experts, by descending logit.",
             shape=("n_tokens", "topk"),
             dtype=_INT32,
+            error_bounds=ToleranceBound(absolute_tolerance=0, relative_tolerance=0),
         ),
     },
     layout_variants=LayoutVariantsSpec(by_name={"row_major": LayoutVariant()}),
     compare=_COMPARE,
+    reference=Qwen2MoeRouterReference(),
+    baseline=Qwen2MoeRouterBaseline(),
 )
 
 QWEN2_MOE_FP8_EXPERTS = OpContract(
@@ -237,6 +255,8 @@ QWEN2_MOE_FP8_EXPERTS = OpContract(
     outputs={"out": _moe_output(25.0)},
     layout_variants=_EXPERT_LAYOUTS,
     compare=_COMPARE,
+    reference=Qwen2MoeFp8ExpertsReference(),
+    baseline=Qwen2MoeFp8ExpertsBaseline(),
 )
 
 QWEN2_MOE_FP8_ROUTER_EXPERTS = OpContract(
@@ -264,6 +284,8 @@ QWEN2_MOE_FP8_ROUTER_EXPERTS = OpContract(
     outputs={"out": _moe_output(25.0)},
     layout_variants=_EXPERT_LAYOUTS,
     compare=_COMPARE,
+    reference=Qwen2MoeFp8RouterExpertsReference(),
+    baseline=Qwen2MoeFp8RouterExpertsBaseline(),
 )
 
 _MXFP4 = DTypeSpec(any_of=(DType.FLOAT4_E2M1,))
@@ -393,12 +415,9 @@ QWEN2_MOE_MXFP4_MOE = OpContract(
     outputs={"out": _moe_output(_MXFP4_MIN_SQNR_DB)},
     layout_variants=_MXFP4_LAYOUTS,
     compare=_COMPARE,
+    reference=Qwen2MoeMxfp4MoeReference(),
+    baseline=Qwen2MoeMxfp4MoeBaseline(),
 )
-
-# Kernels round the activations' MXFP4 scales and the bf16 steps between their own ways: 24 to
-# 35 dB on the bench's inputs. Activations kept bf16 (sglang's own small-M kernel) come to 11 to
-# 14 dB; a reference without the shared expert, or with it ungated, to below 3 dB.
-_MXFP4_A4_MIN_SQNR_DB = 13.0
 
 QWEN2_MOE_MXFP4_ROUTER_EXPERTS = OpContract(
     contract_id="qwen2_moe_mxfp4_router_experts@1.0",
@@ -460,9 +479,20 @@ QWEN2_MOE_MXFP4_ROUTER_EXPERTS = OpContract(
             lifetime="weight",
         ),
     },
-    outputs={"out": _moe_output(_MXFP4_A4_MIN_SQNR_DB)},
+    # kernels come to 24 to 35 dB on the bench's inputs, activations kept bf16 (sglang's own
+    # small-M kernel) to 11 to 14 dB, a reference without the shared expert or ungated below 3 dB
+    outputs={
+        "out": TensorSpec(
+            description="This rank's share of the MoE block's output.",
+            shape=("n_tokens", "model_dim"),
+            dtype=DTypeSpec(same_as_tensor="hidden_states"),
+            error_bounds=MOE_MXFP4_SNR,
+        )
+    },
     layout_variants=_MXFP4_LAYOUTS,
     compare=_COMPARE,
+    reference=Qwen2MoeMxfp4RouterExpertsReference(),
+    baseline=Qwen2MoeMxfp4RouterExpertsBaseline(),
 )
 
 CONTRACTS = (
