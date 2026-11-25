@@ -152,7 +152,8 @@ def summarize(
         min_speedup=min_speedup,
     )
     codec = FastKeyCodec.from_contract(contract)
-    # a bucketed axis keys each measured workload by its own value too (a range key only for RANGE_SAFE kernels)
+    # a bucketed axis keys each measured workload by its own value (its range key serves only kernels declaring their
+    # classes)
     key_of = codec.exact_key if codec.bucketed_indices else codec.match_key
     candidates: dict[tuple, int] = {}
     labels: dict[tuple, dict[str, str]] = {}

@@ -139,7 +139,7 @@ def test_a_capture_is_not_where_the_gathers_are_compared(monkeypatch):
 def test_aklr_disable_names_the_route(monkeypatch):
     xs = _inputs(torch.bfloat16)
     group, tp = _groups(monkeypatch, xs)
-    monkeypatch.setenv("AKLR_DISABLE", f"kimi_k3_kda_prefill@1.0,{dcp.ROUTE_ID}")
+    monkeypatch.setenv("AKLR_DISABLE", f"gemm@1.0,{dcp.ROUTE_ID}")
     dcp._enabled.cache_clear()
     try:
         assert dcp._dcp_query_all_gather(group, xs[0], dim=1) is FallbackReason.DISABLED

@@ -574,7 +574,7 @@ def test_a_class_declaration_holds_together(
     schema = case.contract.narrow(
         case.point, workloads=[{"axes": {"m": m}} for m in ms], kernel=case.schema(source).kernel
     )
-    path = tmp_path / "aklr/ops" / case.contract.op_type / schema.relative_path()
+    path = tmp_path / "aklr/plugins/aiter" / case.contract.op_type / schema.relative_path()
     path.parent.mkdir(parents=True)
     path.write_text(schema.schema_text(), encoding="utf-8")
     scope = ValidationScope(tmp_path, "", None, (path.resolve(),), ())
